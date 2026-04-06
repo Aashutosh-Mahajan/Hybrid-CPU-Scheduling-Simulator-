@@ -1,12 +1,15 @@
 import streamlit as st
 import pandas as pd
 import copy
+import random
 from simulator.models import Process
 from simulator.algorithms import FCFS, SJF, Priority, RoundRobin
 from simulator.mlfq import MLFQSimulator, QueueConfig
+from simulator.hybrid import HybridScheduler, HybridQueueConfig, heuristic_classifier, normalize_process_type
 from utils.visuals import (
     create_gantt_chart,
     calculate_metrics,
+    calculate_metrics_by_type,
     create_comparison_chart,
     create_throughput_comparison,
 )
@@ -15,7 +18,7 @@ from utils.visuals import (
 # PAGE CONFIG
 # ═══════════════════════════════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="Hybrid CPU Scheduler · MLFQ Simulator",
+    page_title="Hybrid CPU Scheduler · Multi-Policy Simulator",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -342,26 +345,22 @@ st.markdown("""
     <div class="hero-badge">⚡ Operating Systems Project</div>
     <div class="hero-title">Hybrid CPU Scheduling<br>Simulator</div>
     <div class="hero-subtitle">
-        Interactive Multi-Level Feedback Queue simulator with real-time 
-        Gantt chart visualization, performance analytics, and algorithm comparison.
+        Type-based multi-policy CPU scheduling with queue routing,
+        Gantt timeline visualization, per-type analytics, and baseline comparison.
     </div>
 </div>
 """, unsafe_allow_html=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# SIDEBAR — Queue Configuration
+# SIDEBAR — Hybrid Queue Configuration
 # ═══════════════════════════════════════════════════════════════════════════════
-with st.sidebar:
-    st.markdown("### ⚙️ Queue Configuration")
-    st.caption("Configure the MLFQ levels below")
-    st.divider()
+SUPPORTED_PROCESS_TYPES = ["real-time", "interactive", "batch"]
 
-    num_queues = st.slider(
-        "Number of Queue Levels",
-        min_value=1, max_value=5, value=3,
-        help="More levels allow finer-grained scheduling."
-    )
+with st.sidebar:
+    st.markdown("### ⚙️ Hybrid Queue Routing")
+    st.caption("Map each process type to its own scheduling algorithm.")
+    st.divider()
 
     algorithms_map = {
         "FCFS": lambda _q: FCFS(),
@@ -371,117 +370,266 @@ with st.sidebar:
         "Round Robin": lambda q: RoundRobin(quantum=q),
     }
 
-    queues_config: list[QueueConfig] = []
+    default_alg_by_type = {
+        "real-time": "Priority (Preemptive)",
+        "interactive": "Round Robin",
+        "batch": "FCFS",
+    }
 
-    for i in range(num_queues):
-        label = f"🔹 Queue {i} — {'Highest Priority' if i == 0 else ('Lowest Priority' if i == num_queues - 1 else f'Level {i}')}"
-        with st.expander(label, expanded=(i == 0)):
+    hybrid_queue_config: list[HybridQueueConfig] = []
+    algo_names = list(algorithms_map.keys())
+
+    for queue_priority, process_type in enumerate(SUPPORTED_PROCESS_TYPES):
+        with st.expander(
+            f"🔹 {process_type.title()} Queue (Priority {queue_priority})",
+            expanded=(queue_priority == 0),
+        ):
+            default_alg = default_alg_by_type[process_type]
             alg_name = st.selectbox(
                 "Algorithm",
-                list(algorithms_map.keys()),
-                key=f"alg_{i}",
-                index=4 if i < num_queues - 1 else 0,  # Default: RR for top queues, FCFS for last
+                algo_names,
+                key=f"hybrid_alg_{process_type}",
+                index=algo_names.index(default_alg),
             )
 
             quantum = 4
             if alg_name == "Round Robin":
                 quantum = st.number_input(
                     "Time Quantum",
-                    min_value=1, value=4, key=f"q_{i}",
-                    help="Number of ticks before context switch."
+                    min_value=1,
+                    value=3 if process_type == "interactive" else 4,
+                    key=f"hybrid_q_{process_type}",
+                    help="Number of ticks before rotation in Round Robin.",
                 )
 
-            alg_inst = algorithms_map[alg_name](quantum)
-
-            upgrade = -1
-            if i > 0:
-                upgrade = st.number_input(
-                    f"Aging upgrade to Q{i-1} (ticks)",
-                    min_value=-1, value=10, key=f"up_{i}",
-                    help="-1 disables aging. Otherwise, after this many ticks waiting, process promotes up."
+            hybrid_queue_config.append(
+                HybridQueueConfig(
+                    process_type=process_type,
+                    algorithm=algorithms_map[alg_name](quantum),
+                    queue_priority=queue_priority,
                 )
-
-            dq = -1
-            if i < num_queues - 1 and alg_name == "Round Robin":
-                dq = st.number_input(
-                    f"Quantum limit to demote to Q{i+1}",
-                    min_value=-1, value=1, key=f"dq_{i}",
-                    help="-1 disables demotion."
-                )
-
-            queues_config.append(QueueConfig(i, alg_inst, upgrade_time=upgrade, downgrade_quantum=dq))
+            )
 
     st.divider()
-    st.caption("Built for OS Course · MLFQ Simulator")
+    auto_classify_unknown = st.toggle(
+        "Auto-classify missing/invalid process type",
+        value=True,
+        help="Heuristic: priority<=1 => real-time, burst<=4 => interactive, otherwise batch.",
+    )
+    st.caption("CPU queue precedence: real-time → interactive → batch")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN CONTENT — Tabs
 # ═══════════════════════════════════════════════════════════════════════════════
-tab_sim, tab_compare, tab_theory = st.tabs(["🖥️  Simulator", "📊  Algorithm Comparison", "📖  Theory"])
+tab_sim, tab_compare, tab_theory = st.tabs(["🖥️  Hybrid Simulator", "📊  Hybrid vs Single", "📖  Theory"])
 
 # ── Default process data ──────────────────────────────────────────────────────
 default_data = [
-    {"PID": "P1", "Arrival Time": 0, "Burst Time": 8,  "Priority": 2},
-    {"PID": "P2", "Arrival Time": 1, "Burst Time": 4,  "Priority": 0},
-    {"PID": "P3", "Arrival Time": 2, "Burst Time": 9,  "Priority": 1},
-    {"PID": "P4", "Arrival Time": 3, "Burst Time": 5,  "Priority": 3},
-    {"PID": "P5", "Arrival Time": 5, "Burst Time": 2,  "Priority": 4},
+    {"PID": "P1", "Type": "interactive", "Arrival Time": 0, "Burst Time": 6, "Priority": 3},
+    {"PID": "P2", "Type": "real-time", "Arrival Time": 1, "Burst Time": 3, "Priority": 0},
+    {"PID": "P3", "Type": "batch", "Arrival Time": 2, "Burst Time": 9, "Priority": 5},
+    {"PID": "P4", "Type": "interactive", "Arrival Time": 3, "Burst Time": 4, "Priority": 2},
+    {"PID": "P5", "Type": "batch", "Arrival Time": 5, "Burst Time": 7, "Priority": 4},
 ]
 
 
-def parse_processes(df: pd.DataFrame) -> list[Process]:
-    """Parse DataFrame rows into Process objects."""
-    processes = []
+def build_classifier(auto_classify: bool):
+    def _classifier(process: Process) -> str:
+        normalized = normalize_process_type(process.process_type)
+        if normalized in SUPPORTED_PROCESS_TYPES:
+            return normalized
+        if auto_classify:
+            return heuristic_classifier(process)
+        return "batch"
+
+    return _classifier
+
+
+def parse_processes(df: pd.DataFrame, auto_classify: bool) -> list[Process]:
+    """Parse DataFrame rows into Process objects with type classification."""
+    processes: list[Process] = []
+    seen_pids: set[str] = set()
+
     for _, row in df.iterrows():
-        if pd.isna(row.get("PID")):
+        raw_pid = row.get("PID")
+        if pd.isna(raw_pid) or str(raw_pid).strip() == "":
             continue
-        processes.append(Process(
-            pid=str(row["PID"]),
-            arrival_time=int(row["Arrival Time"]),
-            burst_time=int(row["Burst Time"]),
-            priority=int(row.get("Priority", 0)),
-        ))
+
+        pid = str(raw_pid).strip()
+        if pid in seen_pids:
+            raise ValueError(f"Duplicate PID detected: {pid}")
+        seen_pids.add(pid)
+
+        try:
+            arrival_time = int(row.get("Arrival Time", 0))
+            burst_time = int(row.get("Burst Time", 0))
+            priority = int(row.get("Priority", 0))
+        except (TypeError, ValueError):
+            raise ValueError(f"Arrival, Burst, and Priority must be integers for {pid}.")
+
+        if arrival_time < 0:
+            raise ValueError(f"Arrival Time cannot be negative for {pid}.")
+        if burst_time <= 0:
+            raise ValueError(f"Burst Time must be greater than 0 for {pid}.")
+
+        process_type = normalize_process_type(str(row.get("Type", "")))
+        if process_type not in SUPPORTED_PROCESS_TYPES:
+            if auto_classify:
+                temp_process = Process(
+                    pid=pid,
+                    arrival_time=arrival_time,
+                    burst_time=burst_time,
+                    priority=priority,
+                    process_type=process_type,
+                )
+                process_type = heuristic_classifier(temp_process)
+            else:
+                process_type = "batch"
+
+        processes.append(
+            Process(
+                pid=pid,
+                arrival_time=arrival_time,
+                burst_time=burst_time,
+                priority=priority,
+                process_type=process_type,
+            )
+        )
+
     return processes
 
 
+def clone_processes(processes: list[Process]) -> list[Process]:
+    return [
+        Process(
+            pid=p.pid,
+            arrival_time=p.arrival_time,
+            burst_time=p.burst_time,
+            priority=p.priority,
+            process_type=p.process_type,
+        )
+        for p in processes
+    ]
+
+
+def generate_processes(
+    interactive_count: int,
+    batch_count: int,
+    realtime_count: int,
+    max_arrival: int,
+    seed: int,
+) -> pd.DataFrame:
+    rng = random.Random(seed)
+    rows = []
+    pid_counter = 1
+
+    def add_processes(count: int, process_type: str, burst_range: tuple[int, int], priority_range: tuple[int, int]):
+        nonlocal pid_counter
+        for _ in range(count):
+            rows.append(
+                {
+                    "PID": f"P{pid_counter}",
+                    "Type": process_type,
+                    "Arrival Time": rng.randint(0, max_arrival),
+                    "Burst Time": rng.randint(burst_range[0], burst_range[1]),
+                    "Priority": rng.randint(priority_range[0], priority_range[1]),
+                }
+            )
+            pid_counter += 1
+
+    add_processes(realtime_count, "real-time", (1, 4), (0, 1))
+    add_processes(interactive_count, "interactive", (2, 6), (2, 4))
+    add_processes(batch_count, "batch", (6, 14), (3, 8))
+
+    rows.sort(key=lambda item: (item["Arrival Time"], item["PID"]))
+    if not rows:
+        return pd.DataFrame(columns=["PID", "Type", "Arrival Time", "Burst Time", "Priority"])
+    return pd.DataFrame(rows)
+
+
+if "process_df" not in st.session_state:
+    st.session_state.process_df = pd.DataFrame(default_data)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — SIMULATOR
+# TAB 1 — HYBRID SIMULATOR
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_sim:
-    st.markdown('<div class="section-header">📝 Process Table</div>', unsafe_allow_html=True)
-    st.caption("Add, edit, or remove processes. Click ➕ at the bottom to add rows.")
+    st.markdown('<div class="section-header">📝 Process Generator & Table</div>', unsafe_allow_html=True)
+    st.caption("Define process attributes and type labels. Hybrid routing sends each type to its configured queue.")
+
+    with st.expander("🎲 Process Generator"):
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            gen_rt = st.number_input("Real-time count", min_value=0, value=2, key="gen_rt")
+        with c2:
+            gen_inter = st.number_input("Interactive count", min_value=0, value=3, key="gen_inter")
+        with c3:
+            gen_batch = st.number_input("Batch count", min_value=0, value=3, key="gen_batch")
+        with c4:
+            gen_max_arrival = st.number_input("Max arrival time", min_value=0, value=10, key="gen_arr")
+
+        c5, c6 = st.columns(2)
+        with c5:
+            seed = st.number_input("Random seed", min_value=0, value=42, key="gen_seed")
+        with c6:
+            st.write("")
+            st.write("")
+            if st.button("Generate Workload", key="gen_btn", use_container_width=True):
+                st.session_state.process_df = generate_processes(
+                    interactive_count=int(gen_inter),
+                    batch_count=int(gen_batch),
+                    realtime_count=int(gen_rt),
+                    max_arrival=int(gen_max_arrival),
+                    seed=int(seed),
+                )
+
+        if st.button("Reset to Default Example", key="reset_default", use_container_width=True):
+            st.session_state.process_df = pd.DataFrame(default_data)
 
     df_input = st.data_editor(
-        pd.DataFrame(default_data),
+        st.session_state.process_df,
         num_rows="dynamic",
-        width="stretch",
+        use_container_width=True,
         key="process_editor",
+        column_config={
+            "Type": st.column_config.SelectboxColumn(
+                "Type",
+                options=SUPPORTED_PROCESS_TYPES,
+                help="Supported values: real-time, interactive, batch",
+            )
+        },
     )
+    st.session_state.process_df = df_input
 
-    st.write("")  # spacing
-    col_btn, col_space = st.columns([1, 3])
-    with col_btn:
-        run_clicked = st.button("▶  Run Simulation", type="primary", use_container_width=True)
+    st.write("")
+    run_clicked = st.button("▶  Run Hybrid Simulation", type="primary", use_container_width=True)
 
     if run_clicked:
         try:
-            processes = parse_processes(df_input)
+            processes = parse_processes(df_input, auto_classify=auto_classify_unknown)
             if not processes:
                 st.warning("⚠️ Please add at least one process.")
                 st.stop()
 
-            simulator = MLFQSimulator(processes, queues_config)
+            classifier = build_classifier(auto_classify_unknown)
+            simulator = HybridScheduler(
+                clone_processes(processes),
+                copy.deepcopy(hybrid_queue_config),
+                classifier=classifier,
+                fallback_type="batch",
+            )
             simulator.run()
 
-            st.success(f"✅ Simulation complete — {len(simulator.completed_processes)} processes scheduled in {simulator.current_time} ticks")
+            st.success(
+                f"✅ Hybrid simulation complete — {len(simulator.completed_processes)} processes scheduled in {simulator.current_time} ticks"
+            )
 
-            # ── KPI Metrics Row ───────────────────────────────────────────
             metrics = calculate_metrics(simulator.completed_processes)
 
             st.write("")
-            st.markdown('<div class="section-header">📈 Performance Metrics</div>', unsafe_allow_html=True)
-
+            st.markdown('<div class="section-header">📈 Overall Metrics</div>', unsafe_allow_html=True)
             m1, m2, m3, m4, m5 = st.columns(5)
 
             with m1:
@@ -525,46 +673,57 @@ with tab_sim:
                 </div>
                 """, unsafe_allow_html=True)
 
-            # ── Gantt Chart ───────────────────────────────────────────────
             st.write("")
-            st.write("")
-            st.markdown('<div class="section-header">📊 Gantt Chart</div>', unsafe_allow_html=True)
-
-            fig = create_gantt_chart(simulator.gantt_chart)
+            st.markdown('<div class="section-header">📊 Gantt Timeline</div>', unsafe_allow_html=True)
+            fig = create_gantt_chart(simulator.gantt_chart, queue_labels=simulator.queue_label_map)
             if fig:
-                st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
-            else:
-                st.info("No execution data to display.")
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-            # ── Process Results Table ─────────────────────────────────────
             st.write("")
-            st.markdown('<div class="section-header">📋 Detailed Results</div>', unsafe_allow_html=True)
+            st.markdown('<div class="section-header">🧮 Metrics by Process Type</div>', unsafe_allow_html=True)
+            by_type = calculate_metrics_by_type(simulator.completed_processes)
+            if by_type:
+                type_rows = []
+                for process_type, values in by_type.items():
+                    type_rows.append(
+                        {
+                            "Type": process_type,
+                            "Processes": values["count"],
+                            "Avg WT": values["avg_wt"],
+                            "Avg TAT": values["avg_tat"],
+                            "Avg RT": values["avg_rt"],
+                            "Throughput": values["throughput"],
+                            "CPU Util %": values["cpu_util"],
+                        }
+                    )
+                st.dataframe(pd.DataFrame(type_rows), use_container_width=True, hide_index=True)
 
-            results = [{
-                "PID": p.pid,
-                "Arrival": p.arrival_time,
-                "Burst": p.burst_time,
-                "Priority": p.priority,
-                "Start": p.start_time,
-                "Finish": p.finish_time,
-                "Turnaround (TAT)": p.turnaround_time,
-                "Waiting (WT)": p.waiting_time,
-                "Response (RT)": p.response_time,
-            } for p in simulator.completed_processes]
+            st.write("")
+            st.markdown('<div class="section-header">📋 Detailed Process Results</div>', unsafe_allow_html=True)
+            results = [
+                {
+                    "PID": p.pid,
+                    "Type": p.process_type,
+                    "Arrival": p.arrival_time,
+                    "Burst": p.burst_time,
+                    "Priority": p.priority,
+                    "Start": p.start_time,
+                    "Finish": p.finish_time,
+                    "Turnaround (TAT)": p.turnaround_time,
+                    "Waiting (WT)": p.waiting_time,
+                    "Response (RT)": p.response_time,
+                }
+                for p in simulator.completed_processes
+            ]
+            st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
 
-            st.dataframe(
-                pd.DataFrame(results),
-                width="stretch",
-                hide_index=True,
-            )
-
-            # ── Execution Log ─────────────────────────────────────────────
-            with st.expander("🔍 Execution Trace (Gantt Blocks)"):
+            with st.expander("🔍 Execution Trace"):
                 for block in simulator.gantt_chart:
                     if block.pid == "IDLE":
                         st.text(f"  t={block.start:>3}–{block.end:<3}  │  ⏸  CPU Idle")
                     else:
-                        st.text(f"  t={block.start:>3}–{block.end:<3}  │  Q{block.queue_id}  │  {block.pid}")
+                        lane = simulator.queue_label_map.get(block.queue_id, f"Queue {block.queue_id}")
+                        st.text(f"  t={block.start:>3}–{block.end:<3}  │  {lane:<28}  │  {block.pid}")
 
         except Exception as e:
             st.error(f"❌ Simulation error: {str(e)}")
@@ -573,25 +732,37 @@ with tab_sim:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — ALGORITHM COMPARISON
+# TAB 2 — HYBRID COMPARISON
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab_compare:
-    st.markdown('<div class="section-header">📊 Compare Scheduling Algorithms</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">📊 Hybrid vs Single-Algorithm Comparison</div>', unsafe_allow_html=True)
     st.caption(
-        "Run the same process set through different classic scheduling algorithms "
-        "and compare their performance metrics side-by-side."
+        "Compare your type-based hybrid policy against classic one-policy schedulers "
+        "on the same workload."
     )
 
-    rr_quantum = st.slider("Round Robin Quantum for comparison", min_value=1, max_value=10, value=4, key="cmp_q")
+    rr_quantum = st.slider("Round Robin quantum for baseline RR", min_value=1, max_value=10, value=4, key="cmp_q")
 
-    if st.button("▶  Run Comparison", type="primary", key="run_compare"):
+    if st.button("▶  Run Hybrid Comparison", type="primary", key="run_compare"):
         try:
-            processes = parse_processes(df_input)
+            processes = parse_processes(st.session_state.process_df, auto_classify=auto_classify_unknown)
             if not processes:
-                st.warning("⚠️ Please add processes in the Simulator tab first.")
+                st.warning("⚠️ Please add processes in the Hybrid Simulator tab first.")
                 st.stop()
 
-            comparison_algos = {
+            comparison_data = {}
+            classifier = build_classifier(auto_classify_unknown)
+
+            hybrid_sim = HybridScheduler(
+                clone_processes(processes),
+                copy.deepcopy(hybrid_queue_config),
+                classifier=classifier,
+                fallback_type="batch",
+            )
+            hybrid_sim.run()
+            comparison_data["Hybrid (Type-Based)"] = calculate_metrics(hybrid_sim.completed_processes)
+
+            baseline_algorithms = {
                 "FCFS": FCFS(),
                 "SJF": SJF(is_preemptive=False),
                 "SRTF": SJF(is_preemptive=True),
@@ -599,53 +770,45 @@ with tab_compare:
                 f"RR (q={rr_quantum})": RoundRobin(quantum=rr_quantum),
             }
 
-            comparison_data = {}
-
-            for alg_name, alg_inst in comparison_algos.items():
-                # Deep-copy processes for each run
-                procs_copy = [
-                    Process(
-                        pid=p.pid,
-                        arrival_time=p.arrival_time,
-                        burst_time=p.burst_time,
-                        priority=p.priority,
-                    )
-                    for p in processes
-                ]
-                # Single-queue simulation
-                q_cfg = QueueConfig(0, alg_inst, upgrade_time=-1, downgrade_quantum=-1)
-                sim = MLFQSimulator(procs_copy, [q_cfg])
+            for alg_name, alg_inst in baseline_algorithms.items():
+                procs_copy = clone_processes(processes)
+                single_q = QueueConfig(0, alg_inst, upgrade_time=-1, downgrade_quantum=-1)
+                sim = MLFQSimulator(procs_copy, [single_q])
                 sim.run()
                 comparison_data[alg_name] = calculate_metrics(sim.completed_processes)
 
             st.success("✅ Comparison complete!")
 
-            # ── Metrics comparison chart ──────────────────────────────────
+            best_algo = min(comparison_data.items(), key=lambda item: item[1]["avg_wt"])
+            st.info(
+                f"Lowest average waiting time: {best_algo[0]} ({best_algo[1]['avg_wt']} ms)"
+            )
+
             st.write("")
             st.markdown('<div class="section-header">⏱️ Time Metrics</div>', unsafe_allow_html=True)
             fig_cmp = create_comparison_chart(comparison_data)
-            st.plotly_chart(fig_cmp, width="stretch", config={"displayModeBar": False})
+            st.plotly_chart(fig_cmp, use_container_width=True, config={"displayModeBar": False})
 
-            # ── Throughput chart ───────────────────────────────────────────
             st.write("")
             st.markdown('<div class="section-header">🚀 Throughput</div>', unsafe_allow_html=True)
             fig_tp = create_throughput_comparison(comparison_data)
-            st.plotly_chart(fig_tp, width="stretch", config={"displayModeBar": False})
+            st.plotly_chart(fig_tp, use_container_width=True, config={"displayModeBar": False})
 
-            # ── Raw numbers table ─────────────────────────────────────────
             st.write("")
             st.markdown('<div class="section-header">📋 Raw Numbers</div>', unsafe_allow_html=True)
             cmp_rows = []
-            for alg, m in comparison_data.items():
-                cmp_rows.append({
-                    "Algorithm": alg,
-                    "Avg WT": m["avg_wt"],
-                    "Avg TAT": m["avg_tat"],
-                    "Avg RT": m["avg_rt"],
-                    "Throughput": m["throughput"],
-                    "CPU Util %": m["cpu_util"],
-                })
-            st.dataframe(pd.DataFrame(cmp_rows), width="stretch", hide_index=True)
+            for algorithm_name, m in comparison_data.items():
+                cmp_rows.append(
+                    {
+                        "Algorithm": algorithm_name,
+                        "Avg WT": m["avg_wt"],
+                        "Avg TAT": m["avg_tat"],
+                        "Avg RT": m["avg_rt"],
+                        "Throughput": m["throughput"],
+                        "CPU Util %": m["cpu_util"],
+                    }
+                )
+            st.dataframe(pd.DataFrame(cmp_rows), use_container_width=True, hide_index=True)
 
         except Exception as e:
             st.error(f"❌ Comparison error: {str(e)}")
@@ -662,18 +825,16 @@ with tab_theory:
 
     st.markdown("""
     <div class="theory-card">
-        <div class="theory-title">🔄 Multi-Level Feedback Queue (MLFQ)</div>
+        <div class="theory-title">🔀 Hybrid Multi-Queue Scheduling</div>
         <div class="theory-body">
-            MLFQ uses multiple ready queues with different priority levels and scheduling algorithms. 
-            New processes enter the highest-priority queue. If a process uses its full time quantum without completing, 
-            it is <strong>demoted</strong> to a lower-priority queue. Processes that wait too long in a lower queue 
-            can be <strong>promoted (aged)</strong> back up to prevent starvation.<br><br>
+            Hybrid scheduling classifies each process into a type queue and applies a dedicated policy per queue. 
+            Example mapping: <strong>real-time → Priority</strong>, <strong>interactive → Round Robin</strong>, 
+            <strong>batch → FCFS/SJF</strong>. The CPU always picks from the highest-priority non-empty queue.<br><br>
             <strong>Key rules:</strong><br>
-            1. If Priority(A) > Priority(B) → A runs<br>
-            2. If Priority(A) = Priority(B) → Run in RR order<br>
-            3. New jobs start at highest priority<br>
-            4. If a job uses its time allotment → demote<br>
-            5. Periodically boost all jobs to prevent starvation
+            1. Classify incoming process by type<br>
+            2. Route to that type's configured algorithm queue<br>
+            3. Serve queues by global precedence (real-time first, then interactive, then batch)<br>
+            4. Inside each queue, run the selected algorithm exactly as defined
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -768,7 +929,7 @@ with tab_theory:
 # ═══════════════════════════════════════════════════════════════════════════════
 st.markdown("""
 <div class="footer">
-    Hybrid CPU Scheduling Simulator · Multi-Level Feedback Queue<br>
+    Hybrid CPU Scheduling Simulator · Type-Based Multi-Policy Engine<br>
     Built with Streamlit & Plotly · Operating Systems Project
 </div>
 """, unsafe_allow_html=True)

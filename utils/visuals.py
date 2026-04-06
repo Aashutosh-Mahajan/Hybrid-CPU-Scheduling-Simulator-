@@ -2,7 +2,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 import numpy as np
-from typing import List, Dict
+from typing import List, Dict, Optional
 from simulator.models import Process, GanttBlock
 
 # ─── Color palette ───────────────────────────────────────────────────────────
@@ -33,7 +33,7 @@ def _get_process_color(pid: str, pid_list: list) -> str:
     return PROCESS_COLORS[idx % len(PROCESS_COLORS)]
 
 
-def create_gantt_chart(gantt_chart: List[GanttBlock]):
+def create_gantt_chart(gantt_chart: List[GanttBlock], queue_labels: Optional[Dict[int, str]] = None):
     """Create a horizontal bar-based Gantt chart using integer time ticks."""
     if not gantt_chart:
         return None
@@ -62,9 +62,11 @@ def create_gantt_chart(gantt_chart: List[GanttBlock]):
         q_y = queue_y_map.get(block.queue_id, 0)
         duration = block.end - block.start
 
+        lane_name = queue_labels.get(block.queue_id, f"Queue {block.queue_id}") if queue_labels else f"Queue {block.queue_id}"
+
         fig.add_trace(go.Bar(
             x=[duration],
-            y=[f"Queue {block.queue_id}"],
+            y=[lane_name],
             base=[block.start],
             orientation='h',
             name=block.pid,
@@ -220,3 +222,37 @@ def calculate_metrics(processes: List[Process]) -> dict:
         "throughput": round(n / total_time if total_time > 0 else 0, 4),
         "cpu_util": cpu_util,
     }
+
+
+def calculate_metrics_by_type(processes: List[Process]) -> Dict[str, Dict[str, float]]:
+    """Calculate metrics grouped by process type."""
+    if not processes:
+        return {}
+
+    grouped: Dict[str, List[Process]] = {}
+    for process in processes:
+        ptype = (getattr(process, "process_type", "") or "batch").strip().lower()
+        grouped.setdefault(ptype, []).append(process)
+
+    max_finish = max(p.finish_time for p in processes)
+    min_arrival = min(p.arrival_time for p in processes)
+    total_time = max_finish - min_arrival
+
+    metrics_by_type: Dict[str, Dict[str, float]] = {}
+    for ptype, items in grouped.items():
+        n = len(items)
+        total_wt = sum(p.waiting_time for p in items)
+        total_tat = sum(p.turnaround_time for p in items)
+        total_rt = sum(p.response_time for p in items)
+        total_burst = sum(p.burst_time for p in items)
+
+        metrics_by_type[ptype] = {
+            "count": n,
+            "avg_wt": round(total_wt / n, 2),
+            "avg_tat": round(total_tat / n, 2),
+            "avg_rt": round(total_rt / n, 2),
+            "throughput": round(n / total_time if total_time > 0 else 0, 4),
+            "cpu_util": round((total_burst / total_time * 100) if total_time > 0 else 0, 1),
+        }
+
+    return metrics_by_type

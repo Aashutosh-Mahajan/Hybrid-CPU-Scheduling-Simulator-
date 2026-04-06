@@ -7,6 +7,7 @@ class Process:
     arrival_time: int
     burst_time: int
     priority: int = 0
+    process_type: str = "batch"
     
     # State tracking
     remaining_time: int = field(init=False)
