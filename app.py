@@ -355,12 +355,24 @@ st.markdown("""
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR — Hybrid Queue Configuration
 # ═══════════════════════════════════════════════════════════════════════════════
-SUPPORTED_PROCESS_TYPES = ["real-time", "interactive", "batch"]
+DEFAULT_QUEUE_NAMES = ["real-time", "interactive", "batch"]
 
 with st.sidebar:
     st.markdown("### ⚙️ Hybrid Queue Routing")
-    st.caption("Map each process type to its own scheduling algorithm.")
+    st.caption("Configure any number of queues and map each process to one queue.")
     st.divider()
+
+    queue_count = int(
+        st.number_input(
+            "Number of Queues",
+            min_value=1,
+            max_value=12,
+            value=int(st.session_state.get("queue_count", 3)),
+            step=1,
+            key="queue_count",
+            help="Increase or decrease total queue lanes used by the hybrid scheduler.",
+        )
+    )
 
     algorithms_map = {
         "FCFS": lambda _q: FCFS(),
@@ -377,18 +389,42 @@ with st.sidebar:
     }
 
     hybrid_queue_config: list[HybridQueueConfig] = []
+    configured_queue_names: list[str] = []
+    seen_queue_names: set[str] = set()
     algo_names = list(algorithms_map.keys())
 
-    for queue_priority, process_type in enumerate(SUPPORTED_PROCESS_TYPES):
+    for queue_priority in range(queue_count):
+        default_queue_name = st.session_state.get(
+            f"queue_name_{queue_priority}",
+            DEFAULT_QUEUE_NAMES[queue_priority]
+            if queue_priority < len(DEFAULT_QUEUE_NAMES)
+            else f"queue-{queue_priority + 1}",
+        )
+
         with st.expander(
-            f"🔹 {process_type.title()} Queue (Priority {queue_priority})",
+            f"🔹 Queue {queue_priority + 1} (Priority {queue_priority})",
             expanded=(queue_priority == 0),
         ):
-            default_alg = default_alg_by_type[process_type]
+            queue_name_input = st.text_input(
+                "Queue Name",
+                value=str(default_queue_name),
+                key=f"queue_name_{queue_priority}",
+                help="This name appears in the process table Type dropdown.",
+            )
+            queue_name = normalize_process_type(queue_name_input)
+            if not str(queue_name_input).strip():
+                queue_name = f"queue-{queue_priority + 1}"
+            if queue_name in seen_queue_names:
+                queue_name = f"{queue_name}-{queue_priority + 1}"
+                st.caption(f"Duplicate name detected. Using unique label: {queue_name}")
+            seen_queue_names.add(queue_name)
+            configured_queue_names.append(queue_name)
+
+            default_alg = default_alg_by_type.get(queue_name, "FCFS")
             alg_name = st.selectbox(
                 "Algorithm",
                 algo_names,
-                key=f"hybrid_alg_{process_type}",
+                key=f"hybrid_alg_{queue_priority}",
                 index=algo_names.index(default_alg),
             )
 
@@ -397,26 +433,28 @@ with st.sidebar:
                 quantum = st.number_input(
                     "Time Quantum",
                     min_value=1,
-                    value=3 if process_type == "interactive" else 4,
-                    key=f"hybrid_q_{process_type}",
+                    value=3 if queue_name == "interactive" else 4,
+                    key=f"hybrid_q_{queue_priority}",
                     help="Number of ticks before rotation in Round Robin.",
                 )
 
             hybrid_queue_config.append(
                 HybridQueueConfig(
-                    process_type=process_type,
+                    process_type=queue_name,
                     algorithm=algorithms_map[alg_name](quantum),
                     queue_priority=queue_priority,
                 )
             )
 
+    SUPPORTED_PROCESS_TYPES = configured_queue_names or ["queue-1"]
+
     st.divider()
     auto_classify_unknown = st.toggle(
         "Auto-classify missing/invalid process type",
         value=True,
-        help="Heuristic: priority<=1 => real-time, burst<=4 => interactive, otherwise batch.",
+        help="If Type is invalid, map heuristically when possible, otherwise use last queue.",
     )
-    st.caption("CPU queue precedence: real-time → interactive → batch")
+    st.caption(f"CPU queue precedence: {' → '.join(SUPPORTED_PROCESS_TYPES)}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -435,13 +473,20 @@ default_data = [
 
 
 def build_classifier(auto_classify: bool):
+    queue_types = list(SUPPORTED_PROCESS_TYPES)
+    fallback_type = queue_types[-1] if queue_types else "queue-1"
+
     def _classifier(process: Process) -> str:
         normalized = normalize_process_type(process.process_type)
-        if normalized in SUPPORTED_PROCESS_TYPES:
+        if normalized in queue_types:
             return normalized
+
         if auto_classify:
-            return heuristic_classifier(process)
-        return "batch"
+            predicted = heuristic_classifier(process)
+            if predicted in queue_types:
+                return predicted
+
+        return fallback_type
 
     return _classifier
 
@@ -450,6 +495,8 @@ def parse_processes(df: pd.DataFrame, auto_classify: bool) -> list[Process]:
     """Parse DataFrame rows into Process objects with type classification."""
     processes: list[Process] = []
     seen_pids: set[str] = set()
+    supported_types = list(SUPPORTED_PROCESS_TYPES)
+    fallback_type = supported_types[-1] if supported_types else "queue-1"
 
     for _, row in df.iterrows():
         raw_pid = row.get("PID")
@@ -474,7 +521,7 @@ def parse_processes(df: pd.DataFrame, auto_classify: bool) -> list[Process]:
             raise ValueError(f"Burst Time must be greater than 0 for {pid}.")
 
         process_type = normalize_process_type(str(row.get("Type", "")))
-        if process_type not in SUPPORTED_PROCESS_TYPES:
+        if process_type not in supported_types:
             if auto_classify:
                 temp_process = Process(
                     pid=pid,
@@ -483,9 +530,10 @@ def parse_processes(df: pd.DataFrame, auto_classify: bool) -> list[Process]:
                     priority=priority,
                     process_type=process_type,
                 )
-                process_type = heuristic_classifier(temp_process)
+                predicted = heuristic_classifier(temp_process)
+                process_type = predicted if predicted in supported_types else fallback_type
             else:
-                process_type = "batch"
+                process_type = fallback_type
 
         processes.append(
             Process(
@@ -513,34 +561,82 @@ def clone_processes(processes: list[Process]) -> list[Process]:
     ]
 
 
+def resize_process_dataframe(df: pd.DataFrame, target_count: int, queue_names: list[str]) -> pd.DataFrame:
+    """Resize process table to target rows while preserving existing data."""
+    columns = ["PID", "Type", "Arrival Time", "Burst Time", "Priority"]
+    if df is None or df.empty:
+        normalized_df = pd.DataFrame(columns=columns)
+    else:
+        normalized_df = df.copy()
+        for col in columns:
+            if col not in normalized_df.columns:
+                default_value = "" if col in ("PID", "Type") else 0
+                normalized_df[col] = default_value
+        normalized_df = normalized_df[columns]
+
+    target_count = max(0, int(target_count))
+    current_count = len(normalized_df)
+
+    if target_count < current_count:
+        return normalized_df.iloc[:target_count].reset_index(drop=True)
+
+    if target_count == current_count:
+        return normalized_df
+
+    valid_existing_pids: list[int] = []
+    for pid in normalized_df["PID"].tolist():
+        text_pid = str(pid).strip()
+        if text_pid.startswith("P") and text_pid[1:].isdigit():
+            valid_existing_pids.append(int(text_pid[1:]))
+    next_pid = max(valid_existing_pids, default=0) + 1
+
+    fallback_type = queue_names[0] if queue_names else "queue-1"
+    for _ in range(target_count - current_count):
+        normalized_df.loc[len(normalized_df)] = {
+            "PID": f"P{next_pid}",
+            "Type": fallback_type,
+            "Arrival Time": 0,
+            "Burst Time": 1,
+            "Priority": 0,
+        }
+        next_pid += 1
+
+    return normalized_df.reset_index(drop=True)
+
+
 def generate_processes(
-    interactive_count: int,
-    batch_count: int,
-    realtime_count: int,
+    process_count: int,
+    queue_names: list[str],
     max_arrival: int,
     seed: int,
 ) -> pd.DataFrame:
     rng = random.Random(seed)
     rows = []
-    pid_counter = 1
 
-    def add_processes(count: int, process_type: str, burst_range: tuple[int, int], priority_range: tuple[int, int]):
-        nonlocal pid_counter
-        for _ in range(count):
-            rows.append(
-                {
-                    "PID": f"P{pid_counter}",
-                    "Type": process_type,
-                    "Arrival Time": rng.randint(0, max_arrival),
-                    "Burst Time": rng.randint(burst_range[0], burst_range[1]),
-                    "Priority": rng.randint(priority_range[0], priority_range[1]),
-                }
-            )
-            pid_counter += 1
+    queue_names = queue_names or ["queue-1"]
+    process_count = max(0, int(process_count))
 
-    add_processes(realtime_count, "real-time", (1, 4), (0, 1))
-    add_processes(interactive_count, "interactive", (2, 6), (2, 4))
-    add_processes(batch_count, "batch", (6, 14), (3, 8))
+    for idx in range(process_count):
+        process_type = queue_names[idx % len(queue_names)]
+        if idx == 0:
+            burst_range = (1, 4)
+            priority_range = (0, 1)
+        elif idx == 1:
+            burst_range = (2, 6)
+            priority_range = (2, 4)
+        else:
+            burst_range = (6, 14)
+            priority_range = (3, 8)
+
+        rows.append(
+            {
+                "PID": f"P{idx + 1}",
+                "Type": process_type,
+                "Arrival Time": rng.randint(0, max_arrival),
+                "Burst Time": rng.randint(burst_range[0], burst_range[1]),
+                "Priority": rng.randint(priority_range[0], priority_range[1]),
+            }
+        )
 
     rows.sort(key=lambda item: (item["Arrival Time"], item["PID"]))
     if not rows:
@@ -559,34 +655,74 @@ with tab_sim:
     st.markdown('<div class="section-header">📝 Process Generator & Table</div>', unsafe_allow_html=True)
     st.caption("Define process attributes and type labels. Hybrid routing sends each type to its configured queue.")
 
-    with st.expander("🎲 Process Generator"):
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            gen_rt = st.number_input("Real-time count", min_value=0, value=2, key="gen_rt")
-        with c2:
-            gen_inter = st.number_input("Interactive count", min_value=0, value=3, key="gen_inter")
-        with c3:
-            gen_batch = st.number_input("Batch count", min_value=0, value=3, key="gen_batch")
-        with c4:
-            gen_max_arrival = st.number_input("Max arrival time", min_value=0, value=10, key="gen_arr")
+    active_queue_names = list(SUPPORTED_PROCESS_TYPES)
+    fallback_queue_name = active_queue_names[-1]
 
-        c5, c6 = st.columns(2)
-        with c5:
+    with st.expander("🎲 Process Generator"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            gen_process_count = st.number_input(
+                "Number of processes",
+                min_value=0,
+                value=max(len(st.session_state.process_df), 5),
+                key="gen_count",
+                help="Generate this many processes and spread them across configured queues.",
+            )
+        with c2:
+            gen_max_arrival = st.number_input("Max arrival time", min_value=0, value=10, key="gen_arr")
+        with c3:
             seed = st.number_input("Random seed", min_value=0, value=42, key="gen_seed")
-        with c6:
+
+        c4, c5 = st.columns(2)
+        with c4:
             st.write("")
             st.write("")
             if st.button("Generate Workload", key="gen_btn", use_container_width=True):
                 st.session_state.process_df = generate_processes(
-                    interactive_count=int(gen_inter),
-                    batch_count=int(gen_batch),
-                    realtime_count=int(gen_rt),
+                    process_count=int(gen_process_count),
+                    queue_names=active_queue_names,
                     max_arrival=int(gen_max_arrival),
                     seed=int(seed),
                 )
 
-        if st.button("Reset to Default Example", key="reset_default", use_container_width=True):
-            st.session_state.process_df = pd.DataFrame(default_data)
+        with c5:
+            st.write("")
+            st.write("")
+            if st.button("Reset to Default Example", key="reset_default", use_container_width=True):
+                st.session_state.process_df = pd.DataFrame(default_data)
+
+        st.write("")
+        c6, c7 = st.columns([3, 1])
+        with c6:
+            table_target_count = st.number_input(
+                "Adjust process rows",
+                min_value=0,
+                value=len(st.session_state.process_df),
+                step=1,
+                key="table_process_count",
+                help="Increase or decrease rows without regenerating all process values.",
+            )
+        with c7:
+            st.write("")
+            st.write("")
+            if st.button("Apply Count", key="apply_process_count", use_container_width=True):
+                st.session_state.process_df = resize_process_dataframe(
+                    st.session_state.process_df,
+                    int(table_target_count),
+                    active_queue_names,
+                )
+
+    st.session_state.process_df = resize_process_dataframe(
+        st.session_state.process_df,
+        len(st.session_state.process_df),
+        active_queue_names,
+    )
+
+    def coerce_type(value: object) -> str:
+        normalized = normalize_process_type(str(value))
+        return normalized if normalized in active_queue_names else fallback_queue_name
+
+    st.session_state.process_df["Type"] = st.session_state.process_df["Type"].apply(coerce_type)
 
     df_input = st.data_editor(
         st.session_state.process_df,
@@ -596,8 +732,8 @@ with tab_sim:
         column_config={
             "Type": st.column_config.SelectboxColumn(
                 "Type",
-                options=SUPPORTED_PROCESS_TYPES,
-                help="Supported values: real-time, interactive, batch",
+                options=active_queue_names,
+                help="Pick the queue this process should be routed to.",
             )
         },
     )
@@ -618,7 +754,7 @@ with tab_sim:
                 clone_processes(processes),
                 copy.deepcopy(hybrid_queue_config),
                 classifier=classifier,
-                fallback_type="batch",
+                fallback_type=SUPPORTED_PROCESS_TYPES[-1],
             )
             simulator.run()
 
@@ -757,7 +893,7 @@ with tab_compare:
                 clone_processes(processes),
                 copy.deepcopy(hybrid_queue_config),
                 classifier=classifier,
-                fallback_type="batch",
+                fallback_type=SUPPORTED_PROCESS_TYPES[-1],
             )
             hybrid_sim.run()
             comparison_data["Hybrid (Type-Based)"] = calculate_metrics(hybrid_sim.completed_processes)
