@@ -1,3 +1,12 @@
+"""
+app.py
+──────
+Entry point for the Hybrid CPU Scheduling Simulator.
+This Streamlit application provides the UI, manages the interactive process data
+table, configures the queue routing logic, and renders the visual results using
+Plotly charts and metrics.
+"""
+
 import streamlit as st
 import pandas as pd
 import copy
@@ -374,24 +383,44 @@ with st.sidebar:
         )
     )
 
-    algorithms_map = {
-        "FCFS": lambda _q: FCFS(),
-        "SJF (Non-Preemptive)": lambda _q: SJF(is_preemptive=False),
-        "SRTF (Preemptive SJF)": lambda _q: SJF(is_preemptive=True),
-        "Priority (Preemptive)": lambda _q: Priority(is_preemptive=True),
-        "Round Robin": lambda q: RoundRobin(quantum=q),
-    }
+    def get_algorithm(alg_name: str, quantum: int):
+        if alg_name == "FCFS (First Come First Serve)":
+            return FCFS()
+        elif alg_name == "SJF (Shortest Job First)":
+            return SJF(is_preemptive=False)
+        elif alg_name == "Priority (Non-Preemptive)":
+            return Priority(is_preemptive=False)
+        elif alg_name == "SRTF (Shortest Remaining Time First)":
+            return SJF(is_preemptive=True)
+        elif alg_name == "SRTN (Shortest Remaining Time Next)":
+            alg = SJF(is_preemptive=True)
+            alg.name = "SRTN"
+            return alg
+        elif alg_name == "Round Robin":
+            return RoundRobin(quantum=quantum)
+        elif alg_name == "Priority (Preemptive)":
+            return Priority(is_preemptive=True)
+        return FCFS()
+
+    algo_names = [
+        "FCFS (First Come First Serve)",
+        "SJF (Shortest Job First)",
+        "Priority (Non-Preemptive)",
+        "SRTF (Shortest Remaining Time First)",
+        "SRTN (Shortest Remaining Time Next)",
+        "Round Robin",
+        "Priority (Preemptive)"
+    ]
 
     default_alg_by_type = {
         "real-time": "Priority (Preemptive)",
         "interactive": "Round Robin",
-        "batch": "FCFS",
+        "batch": "FCFS (First Come First Serve)",
     }
 
     hybrid_queue_config: list[HybridQueueConfig] = []
     configured_queue_names: list[str] = []
     seen_queue_names: set[str] = set()
-    algo_names = list(algorithms_map.keys())
 
     for queue_priority in range(queue_count):
         default_queue_name = st.session_state.get(
@@ -420,7 +449,7 @@ with st.sidebar:
             seen_queue_names.add(queue_name)
             configured_queue_names.append(queue_name)
 
-            default_alg = default_alg_by_type.get(queue_name, "FCFS")
+            default_alg = default_alg_by_type.get(queue_name, "FCFS (First Come First Serve)")
             alg_name = st.selectbox(
                 "Algorithm",
                 algo_names,
@@ -441,7 +470,7 @@ with st.sidebar:
             hybrid_queue_config.append(
                 HybridQueueConfig(
                     process_type=queue_name,
-                    algorithm=algorithms_map[alg_name](quantum),
+                    algorithm=get_algorithm(alg_name, quantum),
                     queue_priority=queue_priority,
                 )
             )
@@ -460,7 +489,7 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════════════════════════
 # MAIN CONTENT — Tabs
 # ═══════════════════════════════════════════════════════════════════════════════
-tab_sim, tab_compare, tab_theory = st.tabs(["🖥️  Hybrid Simulator", "📊  Hybrid vs Single", "📖  Theory"])
+tab_sim, tab_theory = st.tabs(["🖥️  Hybrid Simulator", "📖  Theory"])
 
 # ── Default process data ──────────────────────────────────────────────────────
 default_data = [
@@ -473,6 +502,11 @@ default_data = [
 
 
 def build_classifier(auto_classify: bool):
+    """
+    Returns a closure that classifies a Process into a valid queue type.
+    If the process's type isn't configured, it either uses a heuristic (if auto_classify is True)
+    or forces it into the fallback (lowest priority) queue.
+    """
     queue_types = list(SUPPORTED_PROCESS_TYPES)
     fallback_type = queue_types[-1] if queue_types else "queue-1"
 
@@ -492,7 +526,11 @@ def build_classifier(auto_classify: bool):
 
 
 def parse_processes(df: pd.DataFrame, auto_classify: bool) -> list[Process]:
-    """Parse DataFrame rows into Process objects with type classification."""
+    """
+    Convert the UI's pandas DataFrame into a list of valid Process objects.
+    Enforces format rules (duplicate PIDs, negative times) and applies the
+    classification strategy to unrecognised process types.
+    """
     processes: list[Process] = []
     seen_pids: set[str] = set()
     supported_types = list(SUPPORTED_PROCESS_TYPES)
@@ -549,6 +587,11 @@ def parse_processes(df: pd.DataFrame, auto_classify: bool) -> list[Process]:
 
 
 def clone_processes(processes: list[Process]) -> list[Process]:
+    """
+    Deep-copy a list of Process objects.
+    Used to ensure the simulator engine does not mutate the original data,
+    allowing multiple runs of the same dataset.
+    """
     return [
         Process(
             pid=p.pid,
@@ -562,7 +605,11 @@ def clone_processes(processes: list[Process]) -> list[Process]:
 
 
 def resize_process_dataframe(df: pd.DataFrame, target_count: int, queue_names: list[str]) -> pd.DataFrame:
-    """Resize process table to target rows while preserving existing data."""
+    """
+    Adjusts the number of rows in the process data table without discarding existing input.
+    If increasing, it pads with new default rows (e.g., appending P6, P7).
+    If decreasing, it simply crops the bottom rows.
+    """
     columns = ["PID", "Type", "Arrival Time", "Burst Time", "Priority"]
     if df is None or df.empty:
         normalized_df = pd.DataFrame(columns=columns)
@@ -610,6 +657,10 @@ def generate_processes(
     max_arrival: int,
     seed: int,
 ) -> pd.DataFrame:
+    """
+    Generates a deterministic random dataset of processes for testing.
+    (Used predominantly for quickly populating realistic test data across queue types).
+    """
     rng = random.Random(seed)
     rows = []
 
@@ -658,59 +709,21 @@ with tab_sim:
     active_queue_names = list(SUPPORTED_PROCESS_TYPES)
     fallback_queue_name = active_queue_names[-1]
 
-    with st.expander("🎲 Process Generator"):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            gen_process_count = st.number_input(
-                "Number of processes",
-                min_value=0,
-                value=max(len(st.session_state.process_df), 5),
-                key="gen_count",
-                help="Generate this many processes and spread them across configured queues.",
-            )
-        with c2:
-            gen_max_arrival = st.number_input("Max arrival time", min_value=0, value=10, key="gen_arr")
-        with c3:
-            seed = st.number_input("Random seed", min_value=0, value=42, key="gen_seed")
-
-        c4, c5 = st.columns(2)
-        with c4:
-            st.write("")
-            st.write("")
-            if st.button("Generate Workload", key="gen_btn", use_container_width=True):
-                st.session_state.process_df = generate_processes(
-                    process_count=int(gen_process_count),
-                    queue_names=active_queue_names,
-                    max_arrival=int(gen_max_arrival),
-                    seed=int(seed),
-                )
-
-        with c5:
-            st.write("")
-            st.write("")
-            if st.button("Reset to Default Example", key="reset_default", use_container_width=True):
-                st.session_state.process_df = pd.DataFrame(default_data)
-
-        st.write("")
-        c6, c7 = st.columns([3, 1])
-        with c6:
-            table_target_count = st.number_input(
-                "Adjust process rows",
-                min_value=0,
-                value=len(st.session_state.process_df),
-                step=1,
-                key="table_process_count",
-                help="Increase or decrease rows without regenerating all process values.",
-            )
-        with c7:
-            st.write("")
-            st.write("")
-            if st.button("Apply Count", key="apply_process_count", use_container_width=True):
-                st.session_state.process_df = resize_process_dataframe(
-                    st.session_state.process_df,
-                    int(table_target_count),
-                    active_queue_names,
-                )
+    new_count = st.number_input(
+        "Number of processes",
+        min_value=0,
+        value=len(st.session_state.process_df),
+        step=1,
+        key="table_process_count",
+        help="Increase or decrease the number of process rows.",
+    )
+    if int(new_count) != len(st.session_state.process_df):
+        st.session_state.process_df = resize_process_dataframe(
+            st.session_state.process_df,
+            int(new_count),
+            active_queue_names,
+        )
+        st.rerun()
 
     st.session_state.process_df = resize_process_dataframe(
         st.session_state.process_df,
@@ -853,6 +866,29 @@ with tab_sim:
             ]
             st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
 
+            st.write("")
+            st.markdown('<div class="section-header">🧮 Step-by-Step Math Calculations</div>', unsafe_allow_html=True)
+            
+            calc_md = ""
+            for p in simulator.completed_processes:
+                calc_md += f"**Process `{p.pid}`**\n"
+                calc_md += f"- Turnaround Time (Finish - Arrival) = {p.finish_time} - {p.arrival_time} = **{p.turnaround_time}**\n"
+                calc_md += f"- Waiting Time (TAT - Burst) = {p.turnaround_time} - {p.burst_time} = **{p.waiting_time}**\n"
+                calc_md += f"- Response Time (Start - Arrival) = {p.start_time} - {p.arrival_time} = **{p.response_time}**\n\n"
+            
+            n = len(simulator.completed_processes)
+            total_time = max(p.finish_time for p in simulator.completed_processes) - min(p.arrival_time for p in simulator.completed_processes)
+            total_burst = sum(p.burst_time for p in simulator.completed_processes)
+
+            calc_md += "#### 📌 Averages & Totals\n"
+            calc_md += f"- **Avg Waiting Time**: ({' + '.join(str(p.waiting_time) for p in simulator.completed_processes)}) / {n} = **{metrics['avg_wt']}**\n"
+            calc_md += f"- **Avg Turnaround Time**: ({' + '.join(str(p.turnaround_time) for p in simulator.completed_processes)}) / {n} = **{metrics['avg_tat']}**\n"
+            calc_md += f"- **Avg Response Time**: ({' + '.join(str(p.response_time) for p in simulator.completed_processes)}) / {n} = **{metrics['avg_rt']}**\n"
+            calc_md += f"- **Throughput** (N / Total Time): {n} / {total_time} = **{metrics['throughput']}**\n"
+            calc_md += f"- **CPU Utilization** (Total Burst / Total Time): ({total_burst} / {total_time}) * 100 = **{metrics['cpu_util']}%**\n"
+            
+            st.info(calc_md)
+
             with st.expander("🔍 Execution Trace"):
                 for block in simulator.gantt_chart:
                     if block.pid == "IDLE":
@@ -867,89 +903,6 @@ with tab_sim:
             st.code(traceback.format_exc(), language="python")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — HYBRID COMPARISON
-# ═══════════════════════════════════════════════════════════════════════════════
-with tab_compare:
-    st.markdown('<div class="section-header">📊 Hybrid vs Single-Algorithm Comparison</div>', unsafe_allow_html=True)
-    st.caption(
-        "Compare your type-based hybrid policy against classic one-policy schedulers "
-        "on the same workload."
-    )
-
-    rr_quantum = st.slider("Round Robin quantum for baseline RR", min_value=1, max_value=10, value=4, key="cmp_q")
-
-    if st.button("▶  Run Hybrid Comparison", type="primary", key="run_compare"):
-        try:
-            processes = parse_processes(st.session_state.process_df, auto_classify=auto_classify_unknown)
-            if not processes:
-                st.warning("⚠️ Please add processes in the Hybrid Simulator tab first.")
-                st.stop()
-
-            comparison_data = {}
-            classifier = build_classifier(auto_classify_unknown)
-
-            hybrid_sim = HybridScheduler(
-                clone_processes(processes),
-                copy.deepcopy(hybrid_queue_config),
-                classifier=classifier,
-                fallback_type=SUPPORTED_PROCESS_TYPES[-1],
-            )
-            hybrid_sim.run()
-            comparison_data["Hybrid (Type-Based)"] = calculate_metrics(hybrid_sim.completed_processes)
-
-            baseline_algorithms = {
-                "FCFS": FCFS(),
-                "SJF": SJF(is_preemptive=False),
-                "SRTF": SJF(is_preemptive=True),
-                "Priority": Priority(is_preemptive=True),
-                f"RR (q={rr_quantum})": RoundRobin(quantum=rr_quantum),
-            }
-
-            for alg_name, alg_inst in baseline_algorithms.items():
-                procs_copy = clone_processes(processes)
-                single_q = QueueConfig(0, alg_inst, upgrade_time=-1, downgrade_quantum=-1)
-                sim = MLFQSimulator(procs_copy, [single_q])
-                sim.run()
-                comparison_data[alg_name] = calculate_metrics(sim.completed_processes)
-
-            st.success("✅ Comparison complete!")
-
-            best_algo = min(comparison_data.items(), key=lambda item: item[1]["avg_wt"])
-            st.info(
-                f"Lowest average waiting time: {best_algo[0]} ({best_algo[1]['avg_wt']} ms)"
-            )
-
-            st.write("")
-            st.markdown('<div class="section-header">⏱️ Time Metrics</div>', unsafe_allow_html=True)
-            fig_cmp = create_comparison_chart(comparison_data)
-            st.plotly_chart(fig_cmp, use_container_width=True, config={"displayModeBar": False})
-
-            st.write("")
-            st.markdown('<div class="section-header">🚀 Throughput</div>', unsafe_allow_html=True)
-            fig_tp = create_throughput_comparison(comparison_data)
-            st.plotly_chart(fig_tp, use_container_width=True, config={"displayModeBar": False})
-
-            st.write("")
-            st.markdown('<div class="section-header">📋 Raw Numbers</div>', unsafe_allow_html=True)
-            cmp_rows = []
-            for algorithm_name, m in comparison_data.items():
-                cmp_rows.append(
-                    {
-                        "Algorithm": algorithm_name,
-                        "Avg WT": m["avg_wt"],
-                        "Avg TAT": m["avg_tat"],
-                        "Avg RT": m["avg_rt"],
-                        "Throughput": m["throughput"],
-                        "CPU Util %": m["cpu_util"],
-                    }
-                )
-            st.dataframe(pd.DataFrame(cmp_rows), use_container_width=True, hide_index=True)
-
-        except Exception as e:
-            st.error(f"❌ Comparison error: {str(e)}")
-            import traceback
-            st.code(traceback.format_exc(), language="python")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1007,9 +960,9 @@ with tab_theory:
     with col_t2:
         st.markdown("""
         <div class="theory-card">
-            <div class="theory-title">📌 SRTF — Shortest Remaining Time First</div>
+            <div class="theory-title">📌 SRTF / SRTN</div>
             <div class="theory-body">
-                Preemptive version of SJF. If a new process arrives with a shorter remaining time 
+                Shortest Remaining Time First (or Next). Preemptive version of SJF. If a new process arrives with a shorter remaining time 
                 than the currently running process, it <strong>preempts</strong> immediately.<br><br>
                 • Preemptive<br>
                 • Optimal average waiting time<br>
@@ -1040,7 +993,7 @@ with tab_theory:
             Can be preemptive or non-preemptive. <strong>Aging</strong> is used to prevent starvation 
             of low-priority processes.<br><br>
             • Lower number = Higher priority (in this simulator)<br>
-            • Preemptive variant implemented here<br>
+            • Both Preemptive and Non-preemptive variants implemented here<br>
             • Starvation possible without aging
         </div>
     </div>
