@@ -158,11 +158,27 @@ class MLFQSimulator:
 
         # ── Main simulation loop ──────────────────────────────────────────────
         # Continue while there are un-admitted, queued, or running processes.
+        iterations = 0
         while remaining_processes or any(q.queue for q in self.queues) or current_running:
 
-            # Safety guard — stop if the simulation runs too long.
-            if self.current_time >= MAX_SIMULATION_TICKS:
+            # Safety guard — stop if the simulation runs too long (iteration based).
+            iterations += 1
+            if iterations >= 1000000:
                 break
+
+            # ┌─ Speedhack: Fast-forward idle time if queues are completely empty ─┐
+            if not current_running and not any(q.queue for q in self.queues) and remaining_processes:
+                next_arrival = remaining_processes[0].arrival_time
+                if self.current_time < next_arrival:
+                    if self.gantt_chart and self.gantt_chart[-1].pid == "IDLE":
+                        self.gantt_chart[-1].end = next_arrival
+                    else:
+                        self.gantt_chart.append(
+                            GanttBlock(-1, "IDLE", self.current_time, next_arrival)
+                        )
+                    self.current_time = next_arrival
+                    continue
+            # └─────────────────────────────────────────────────────────────┘
 
             # ┌─ Step 1: Admit arrivals ─────────────────────────────────────┐
             # All processes that have arrived by the current tick go into Q0.

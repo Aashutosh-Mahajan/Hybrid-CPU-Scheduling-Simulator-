@@ -141,13 +141,15 @@ class SJF(SchedulingAlgorithm):
             return None
 
         # Non-preemptive: stick with the current process if it is still running.
-        if (
-            not self.is_preemptive
-            and current_process
-            and not current_process.is_finished()
-            and current_process in ready_queue
-        ):
-            return current_process
+        if not self.is_preemptive:
+            if current_process and not current_process.is_finished() and current_process in ready_queue:
+                return current_process
+            # If the CPU was yielded due to cross-queue preemption, a partially
+            # executed process might be in the queue. It must be resumed to honour
+            # non-preemption within this tier.
+            for p in ready_queue:
+                if p.start_time != -1 and not p.is_finished():
+                    return p
 
         # Preemptive or CPU is free: pick the shortest remaining time.
         # Ties are broken by arrival_time (earlier arrival wins).
@@ -189,13 +191,14 @@ class Priority(SchedulingAlgorithm):
             return None
 
         # Non-preemptive: keep the current process if it is still running.
-        if (
-            not self.is_preemptive
-            and current_process
-            and not current_process.is_finished()
-            and current_process in ready_queue
-        ):
-            return current_process
+        if not self.is_preemptive:
+            if current_process and not current_process.is_finished() and current_process in ready_queue:
+                return current_process
+            # Honour non-preemption for previously started processes that were
+            # suspended by higher-level queues.
+            for p in ready_queue:
+                if p.start_time != -1 and not p.is_finished():
+                    return p
 
         # Pick the process with the lowest priority number (highest urgency).
         # Ties are broken by arrival_time.

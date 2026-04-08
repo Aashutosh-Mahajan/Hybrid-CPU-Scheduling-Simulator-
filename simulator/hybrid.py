@@ -251,11 +251,33 @@ class HybridScheduler:
         current_slice = 0                                # ticks used in current quantum
 
         # ── Main loop ─────────────────────────────────────────────────────
+        iterations = 0
         while pending or any(queue.queue for queue in self.queues) or current_running:
 
-            # Safety guard — stop on runaway simulations.
-            if self.current_time >= MAX_SIMULATION_TICKS:
+            # Safety guard — stop on runaway simulations based on iterations, not ticks,
+            # to support high burst times and late arrivals properly.
+            iterations += 1
+            if iterations >= 1000000:
                 break
+
+            # ┌─ Speedhack: Fast-forward idle time if queues are completely empty ─┐
+            if not current_running and not any(queue.queue for queue in self.queues) and pending:
+                next_arrival = pending[0].arrival_time
+                if self.current_time < next_arrival:
+                    if self.gantt_chart and self.gantt_chart[-1].pid == "IDLE":
+                        self.gantt_chart[-1].end = next_arrival
+                    else:
+                        self.gantt_chart.append(
+                            GanttBlock(
+                                queue_id=-1,
+                                pid="IDLE",
+                                start=self.current_time,
+                                end=next_arrival,
+                            )
+                        )
+                    self.current_time = next_arrival
+                    continue
+            # └─────────────────────────────────────────────────────────┘
 
             # ┌─ Step 1: Admit arrivals ─────────────────────────────────┐
             # Classify each newly arrived process and route it to the
