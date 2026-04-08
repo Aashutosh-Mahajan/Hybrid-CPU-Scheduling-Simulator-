@@ -1,8 +1,7 @@
 """
 simulator/algorithms.py
 ───────────────────────
-Contains the scheduling algorithm classes used by both the MLFQ simulator
-(simulator/mlfq.py) and the hybrid scheduler (simulator/hybrid.py).
+Contains the scheduling algorithm classes used by the hybrid scheduler (simulator/hybrid.py).
 
 Architecture
 ────────────
@@ -218,8 +217,8 @@ class RoundRobin(SchedulingAlgorithm):
       • When the quantum expires, the process is placed at the back of the
         queue and the next waiting process runs.
       • select_process() always returns the first element of the queue because
-        the quantum expiry and re-queuing logic is handled by the simulator
-        (mlfq.py / hybrid.py) before this method is called.
+        For Round Robin, time quantum enforcement is handled by the overall engine
+        (hybrid.py) before this method is called.
 
     Choosing the quantum:
       • Small quantum  → more responsive but higher context-switch overhead.

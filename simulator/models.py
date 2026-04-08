@@ -40,12 +40,11 @@ class Process:
                                 counts down one tick at a time.
         start_time            : Tick when the process first touches the CPU
                                 (-1 until first scheduled).
-        finish_time           : Tick when remaining_time reaches 0
+        finish_time           : Tick when the process completes
                                 (-1 until completion).
-        current_queue         : MLFQ queue index the process currently belongs to
+        current_queue         : Queue index the process currently belongs to
                                 (0 = highest-priority queue).
-        time_in_current_queue : How long the process has waited in its current
-                                queue — used for aging (promotion).
+        time_in_current_queue : Ticks spent waiting in the current queue (for aging).
 
     Computed metrics (filled in by the simulator on completion):
         waiting_time    : Time spent waiting in ready queues
@@ -68,7 +67,7 @@ class Process:
     start_time: int = field(default=-1, init=False)  # -1 = not started yet
     finish_time: int = field(default=-1, init=False) # -1 = not finished yet
 
-    # MLFQ / hybrid queue tracking
+    # Hybrid queue tracking
     current_queue: int = field(default=0, init=False)
     time_in_current_queue: int = field(default=0, init=False)
 

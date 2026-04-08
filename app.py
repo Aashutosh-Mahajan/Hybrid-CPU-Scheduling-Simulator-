@@ -13,7 +13,6 @@ import copy
 import random
 from simulator.models import Process
 from simulator.algorithms import FCFS, SJF, Priority, RoundRobin
-from simulator.mlfq import MLFQSimulator, QueueConfig
 from simulator.hybrid import HybridScheduler, HybridQueueConfig, heuristic_classifier, normalize_process_type
 from utils.visuals import (
     create_gantt_chart,

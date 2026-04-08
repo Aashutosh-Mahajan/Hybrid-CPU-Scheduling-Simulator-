@@ -17,7 +17,6 @@ Instead of applying one algorithm uniformly to every process, this simulator imp
    - [simulator/models.py](#simulatormodelspy--core-data-structures)
    - [simulator/algorithms.py](#simulatoralgorithmspy--scheduling-algorithm-classes)
    - [simulator/hybrid.py](#simulatorhybridpy--hybrid-scheduler-engine)
-   - [simulator/mlfq.py](#simulatormlfqpy--multi-level-feedback-queue-engine)
    - [utils/visuals.py](#utilsvisualspy--charts--metrics)
 6. [How the Simulation Works (Step by Step)](#how-the-simulation-works-step-by-step)
 7. [Key Metrics Explained](#key-metrics-explained)
@@ -88,8 +87,7 @@ Hybrid-CPU-Scheduling-Simulator-/
 │   ├── __init__.py
 │   ├── models.py           ← Process and GanttBlock data structures
 │   ├── algorithms.py       ← FCFS, SJF, SRTF, Priority, RoundRobin classes
-│   ├── hybrid.py           ← Type-based hybrid scheduler (main engine)
-│   └── mlfq.py             ← Generic MLFQ engine (used for baseline runs)
+│   └── hybrid.py           ← Type-based hybrid scheduler (main engine)
 │
 └── utils/                  ← Visualisation and analytics helpers
     ├── __init__.py
@@ -163,8 +161,8 @@ Represents one CPU process throughout its lifecycle.
 | `remaining_time` | `int` | `__post_init__` | Counts down tick-by-tick during execution |
 | `start_time` | `int` | Simulator | Tick of first CPU access (`-1` until started) |
 | `finish_time` | `int` | Simulator | Tick of completion (`-1` until finished) |
-| `current_queue` | `int` | Simulator | MLFQ queue index currently assigned to |
-| `time_in_current_queue` | `int` | Simulator | Used for aging (promotion) in MLFQ |
+| `current_queue` | `int` | Simulator | queue index currently assigned to |
+| `time_in_current_queue` | `int` | Simulator | Used for aging (promotion) |
 | `waiting_time` | `int` | Simulator | Computed on completion: `TAT − burst_time` |
 | `turnaround_time` | `int` | Simulator | Computed on completion: `finish − arrival` |
 | `response_time` | `int` | Simulator | Computed on first CPU access: `start − arrival` |
@@ -250,39 +248,6 @@ Step 5 → Same-queue preempt   — SRTF/Priority: check for better candidate in
 Step 6 → Schedule             — pick and dispatch the best process if CPU is free
 Step 7 → Execute one tick     — decrement remaining_time, update Gantt, collect if done
 ```
-
----
-
-### `simulator/mlfq.py` — Multi-Level Feedback Queue Engine
-
-**Role:** A generic, configurable MLFQ simulator.  
-In this project it is used as a **single-queue baseline runner** — when you want to run a plain FCFS, SJF, or RR simulation on the same workload, you create one `QueueConfig` and one `MLFQSimulator`.
-
-#### Key difference from `hybrid.py`
-
-| | `hybrid.py` | `mlfq.py` |
-|-|------------|-----------|
-| Process routing | By **type label** (real-time → queue 0) | Every process starts in **Q0** |
-| Queue levels | Fixed per session (user-configured) | N configurable levels |
-| Demotion | Not applicable | Process demoted after quantum expiry |
-| Promotion (aging) | Not applicable | Process promoted after waiting too long |
-
-#### `QueueConfig`
-
-| Field | Description |
-|-------|-------------|
-| `id` | Queue index (0 = highest priority) |
-| `algorithm` | `SchedulingAlgorithm` instance for this level |
-| `upgrade_time` | Ticks before promotion (-1 = disabled) |
-| `downgrade_quantum` | Ticks before demotion (-1 = disabled) |
-| `queue` | Live ready list managed by the simulator |
-
-#### Simulation loop steps
-
-Same 8-step pattern as `hybrid.py` but with the addition of:
-- **Step 1**: All arrivals go to Q0 (not classified by type).
-- **Step 3 (Aging)**: Processes waiting too long in lower queues are promoted.
-- **Step 2 (Quantum expiry with demotion)**: Expired processes move to Q+1 if configured.
 
 ---
 
